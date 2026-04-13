@@ -1,9 +1,9 @@
 """Cache CSV stazioni attive MIMIT con ricerca testuale e geospaziale."""
-
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -13,6 +13,8 @@ from typing import Any
 import aiohttp
 
 from .constants import CSV_COLUMNS, CSV_URL, DEFAULT_HEADERS, ITALY_TZ
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,8 +35,25 @@ class StationCache:
     async def initialize(self) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         loaded = await self._load_cache_file()
-        if not loaded or not self._stations or self._cache_is_stale():
-            await self.refresh(force=True)
+
+        needs_refresh = (not loaded) or (not self._stations) or self._cache_is_stale()
+        if not needs_refresh:
+            return
+
+        refreshed = await self.refresh(force=True)
+
+        # Se il refresh fallisce ma ho già una cache locale, parto comunque.
+        if not refreshed and self._stations:
+            _LOGGER.warning(
+                "Refresh iniziale cache stazioni fallito; uso la cache locale esistente."
+            )
+            return
+
+        # Se non ho né refresh né cache locale, non faccio crashare il bot.
+        if not refreshed:
+            _LOGGER.warning(
+                "Refresh iniziale cache stazioni fallito e nessuna cache locale disponibile."
+            )
 
     def _cache_is_stale(self) -> bool:
         if not self._last_update:
@@ -50,23 +69,46 @@ class StationCache:
             **DEFAULT_HEADERS,
             "Accept": "text/csv,application/csv,text/plain,*/*",
         }
-        async with self._session.get(
-            CSV_URL,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=90),
-        ) as response:
-            if response.status != 200:
-                return False
-            content = await response.text()
 
-        stations, separator = await asyncio.to_thread(self._parse_csv, content)
+        try:
+            async with self._session.get(
+                CSV_URL,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=90),
+            ) as response:
+                if response.status != 200:
+                    _LOGGER.warning(
+                        "Download CSV stazioni fallito con HTTP %s", response.status
+                    )
+                    return False
+
+                content = await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionResetError) as err:
+            _LOGGER.warning("Errore rete durante download CSV stazioni: %s", err)
+            return False
+        except Exception as err:
+            _LOGGER.exception("Errore inatteso durante download CSV stazioni: %s", err)
+            return False
+
+        try:
+            stations, separator = await asyncio.to_thread(self._parse_csv, content)
+        except Exception as err:
+            _LOGGER.exception("Errore parsing CSV stazioni: %s", err)
+            return False
+
         if not stations:
+            _LOGGER.warning("CSV stazioni scaricato ma senza record validi.")
             return False
 
         self._stations = stations
         self._csv_separator = separator
         self._last_update = datetime.now(tz=ITALY_TZ)
-        await self._save_cache_file()
+
+        try:
+            await self._save_cache_file()
+        except Exception as err:
+            _LOGGER.warning("Salvataggio cache stazioni fallito: %s", err)
+
         return True
 
     def get_station(self, station_id: str | int) -> dict[str, Any] | None:
@@ -111,39 +153,47 @@ class StationCache:
         max_radius_km: float | None = None,
     ) -> list[dict[str, Any]]:
         ranked: list[tuple[float, dict[str, Any]]] = []
+
         for station in self._stations.values():
             s_lat = station.get("latitude")
             s_lon = station.get("longitude")
             if s_lat is None or s_lon is None:
                 continue
+
             distance = _haversine_km(lat, lon, float(s_lat), float(s_lon))
             if max_radius_km is not None and distance > max_radius_km:
                 continue
             ranked.append((distance, station))
 
         ranked.sort(key=lambda item: item[0])
+
         output: list[dict[str, Any]] = []
         for distance, station in ranked[:limit]:
             item = dict(station)
             item["distance_km"] = round(distance, 3)
             output.append(item)
+
         return output
 
     async def _load_cache_file(self) -> bool:
         try:
             raw = await asyncio.to_thread(self._cache_path.read_text, "utf-8")
             payload = json.loads(raw)
+
             self._stations = payload.get("stations", {})
             self._csv_separator = payload.get("csv_separator", "|")
+
             last_update = payload.get("last_update")
             if last_update:
                 self._last_update = datetime.fromisoformat(last_update)
                 if self._last_update.tzinfo is None:
                     self._last_update = self._last_update.replace(tzinfo=ITALY_TZ)
+
             return True
         except FileNotFoundError:
             return False
-        except Exception:
+        except Exception as err:
+            _LOGGER.warning("Impossibile caricare la cache stazioni: %s", err)
             return False
 
     async def _save_cache_file(self) -> None:
@@ -207,6 +257,7 @@ class StationCache:
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     earth_radius_km = 6371.0088
+
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     d_phi = math.radians(lat2 - lat1)
