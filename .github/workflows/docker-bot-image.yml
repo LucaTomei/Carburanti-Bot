@@ -6,13 +6,7 @@ on:
       - main
     tags:
       - "v*"
-    paths:
-      - "bot_telegram/**"
-      - ".github/workflows/docker-bot-image.yml"
   pull_request:
-    paths:
-      - "bot_telegram/**"
-      - ".github/workflows/docker-bot-image.yml"
   workflow_dispatch:
 
 jobs:
@@ -54,8 +48,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./bot_telegram
-          file: ./bot_telegram/Dockerfile
+          context: .
+          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
