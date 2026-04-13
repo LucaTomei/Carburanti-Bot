@@ -1,0 +1,11 @@
+services:
+  osservaprezzi-telegram-bot:
+    build: .
+    container_name: osservaprezzi-telegram-bot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BOT_DATA_DIR: ${BOT_DATA_DIR:-/data}
+    volumes:
+      - ./data:/data

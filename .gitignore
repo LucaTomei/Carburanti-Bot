@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Environment variables (mai committare il token!)
+.env
+
+# Dati utente e cache (generati a runtime)
+data/
+.bot_data/
+
+# macOS
+.DS_Store
+.DS_STORE
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Repomix
+repomix-output.xml
+repomix.config.json

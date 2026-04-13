@@ -1,0 +1,15 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.venv
+.env
+.bot_data
+custom_components
+API_NOTES.md
+README.md
+README.it.md
+TELEGRAM_BOT.md
