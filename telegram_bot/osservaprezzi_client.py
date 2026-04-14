@@ -26,20 +26,27 @@ class OsservaprezziClient:
 
     async def fetch_station(self, station_id: str | int, timeout: int = 30) -> dict[str, Any]:
         url = f"{BASE_URL}{STATION_ENDPOINT.format(station_id=station_id)}"
-        async with self._session.get(
-            url,
-            headers=DEFAULT_HEADERS,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as response:
-            if response.status == 200:
-                return await response.json()
-            if response.status == 404:
-                raise OsservaprezziError(f"Stazione {station_id} non trovata")
-            if response.status == 429:
-                raise OsservaprezziError("Rate limit API raggiunto, riprova tra poco")
-            raise OsservaprezziError(
-                f"Errore servizio ({response.status}): {response.reason}"
-            )
+        try:
+            async with self._session.get(
+                url,
+                headers=DEFAULT_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                if response.status == 404:
+                    raise OsservaprezziError(f"Stazione {station_id} non trovata")
+                if response.status == 429:
+                    raise OsservaprezziError("Rate limit API raggiunto, riprova tra poco")
+                raise OsservaprezziError(
+                    f"Errore servizio ({response.status}): {response.reason}"
+                )
+        except OsservaprezziError:
+            raise
+        except aiohttp.ClientError as exc:
+            raise OsservaprezziError(f"Errore di rete: {exc}") from exc
+        except TimeoutError as exc:
+            raise OsservaprezziError("Timeout: il servizio non risponde") from exc
 
     async def search_zone(
         self,
@@ -53,20 +60,26 @@ class OsservaprezziClient:
             "points": [{"lat": lat, "lng": lng}],
             "radius": radius_km,
         }
-        async with self._session.post(
-            url,
-            headers=DEFAULT_HEADERS,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as response:
-            if response.status != 200:
-                if response.status == 429:
-                    raise OsservaprezziError("Rate limit API raggiunto, riprova tra poco")
-                raise OsservaprezziError(
-                    f"Errore ricerca zona ({response.status}): {response.reason}"
-                )
-
-            data = await response.json()
-            if not data.get("success"):
-                raise OsservaprezziError("Ricerca zona non riuscita")
-            return data.get("results", [])
+        try:
+            async with self._session.post(
+                url,
+                headers=DEFAULT_HEADERS,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                if response.status != 200:
+                    if response.status == 429:
+                        raise OsservaprezziError("Rate limit API raggiunto, riprova tra poco")
+                    raise OsservaprezziError(
+                        f"Errore ricerca zona ({response.status}): {response.reason}"
+                    )
+                data = await response.json()
+                if not data.get("success"):
+                    raise OsservaprezziError("Ricerca zona non riuscita")
+                return data.get("results", [])
+        except OsservaprezziError:
+            raise
+        except aiohttp.ClientError as exc:
+            raise OsservaprezziError(f"Errore di rete: {exc}") from exc
+        except TimeoutError as exc:
+            raise OsservaprezziError("Timeout: il servizio non risponde") from exc
