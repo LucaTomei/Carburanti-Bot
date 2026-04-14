@@ -603,6 +603,25 @@ class FuelPriceTelegramBot:
             await self._reply_with_keyboard(update, "✖️ Operazione annullata.")
             return
 
+        # I pulsanti noti hanno sempre la precedenza sullo stato awaiting.
+        # Se l'utente preme un pulsante mentre è in attesa di input, lo stato
+        # viene azzerato e il pulsante viene gestito normalmente.
+        _KNOWN_BUTTONS = {
+            BTN_PRICES, "Prezzi stazione",
+            BTN_SET_STATION, "Imposta stazione",
+            BTN_SEARCH, "Cerca stazioni",
+            BTN_NEARBY, "Stazioni vicine",
+            BTN_BEST, "Miglior prezzo",
+            BTN_NOTIFY, "Imposta notifica",
+            BTN_DISABLE_NOTIFY, "Disattiva notifiche",
+            BTN_MY_SETTINGS, "Le mie impostazioni",
+            BTN_REMOVE_STATION, "Rimuovi stazione",
+            BTN_HELP, "Aiuto",
+        }
+        if text in _KNOWN_BUTTONS:
+            context.user_data.pop("awaiting_input", None)
+            awaiting = None
+
         if awaiting:
             handled = await self._handle_awaiting_input(update, context, awaiting, text)
             if handled:
