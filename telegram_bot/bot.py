@@ -78,7 +78,8 @@ CB_SETTINGS_DISABLE = "cfg:disable"
 CB_SETTINGS_REMOVE = "cfg:remove"
 CB_SERVICE_EXTEND = "svc:x:"      # svc:x:{radius}:{service_id}
 CB_ADMIN_BROADCAST = "adm:bc"
-CB_ADMIN_MSG_ASK = "adm:ma"
+CB_ADMIN_MSG_LIST = "adm:ml:"   # adm:ml:{page}
+CB_ADMIN_SELECT_MSG = "adm:sm:" # adm:sm:{user_id}
 CB_ADMIN_BLOCK_ASK = "adm:ba"
 CB_ADMIN_UNBLOCK_ASK = "adm:ua"
 
@@ -680,13 +681,24 @@ class FuelPriceTelegramBot:
                 ]]),
             )
 
-        elif data == CB_ADMIN_MSG_ASK:
+        elif data.startswith(CB_ADMIN_MSG_LIST):
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            context.user_data["awaiting_input"] = "admin_msg_uid"
+            page = int(data[len(CB_ADMIN_MSG_LIST):] or "0")
+            await self._cb_admin_msg_list(query, page)
+
+        elif data.startswith(CB_ADMIN_SELECT_MSG):
+            if not self._is_admin(user.id):
+                await query.answer("Non autorizzato.", show_alert=True)
+                return
+            target_id = int(data[len(CB_ADMIN_SELECT_MSG):])
+            context.user_data["admin_msg_target"] = target_id
+            context.user_data["awaiting_input"] = "admin_msg_text"
+            target_settings = self._storage.get(target_id)
             await query.edit_message_text(
-                "✉️ Inserisci l'<b>ID Telegram</b> dell'utente a cui inviare il messaggio.",
+                f"✉️ Scrivi il messaggio per <b>{escape(target_settings.display_name)}</b> "
+                f"(<code>{target_id}</code>):",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
@@ -697,27 +709,13 @@ class FuelPriceTelegramBot:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            context.user_data["awaiting_input"] = "admin_block_uid"
-            await query.edit_message_text(
-                "🚫 Inserisci l'<b>ID Telegram</b> dell'utente da bloccare.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
-                ]]),
-            )
+            await self._cb_admin_list(query, 0)
 
         elif data == CB_ADMIN_UNBLOCK_ASK:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            context.user_data["awaiting_input"] = "admin_unblock_uid"
-            await query.edit_message_text(
-                "✅ Inserisci l'<b>ID Telegram</b> dell'utente da sbloccare.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
-                ]]),
-            )
+            await self._cb_admin_list(query, 0)
 
         elif data.startswith(CB_SERVICE_EXTEND):
             payload = data[len(CB_SERVICE_EXTEND):]
@@ -1170,29 +1168,6 @@ class FuelPriceTelegramBot:
             )
             return True
 
-        if awaiting == "admin_msg_uid":
-            if not self._is_admin(user.id):
-                context.user_data.pop("awaiting_input", None)
-                return True
-            if not text.isdigit():
-                await update.message.reply_text(
-                    "ID non valido. Inserisci un ID Telegram numerico.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
-                    ]]),
-                )
-                return True
-            context.user_data["admin_msg_target"] = int(text)
-            context.user_data["awaiting_input"] = "admin_msg_text"
-            await update.message.reply_text(
-                f"✉️ Scrivi il messaggio da inviare all'utente <code>{text}</code>:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
-                ]]),
-            )
-            return True
-
         if awaiting == "admin_msg_text":
             if not self._is_admin(user.id):
                 context.user_data.pop("awaiting_input", None)
@@ -1208,48 +1183,12 @@ class FuelPriceTelegramBot:
                     text=f"✉️ <b>Messaggio dal gestore del bot</b>\n\n{escape(text)}",
                     parse_mode=ParseMode.HTML,
                 )
-                await update.message.reply_text(f"✅ Messaggio inviato a <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    f"✅ Messaggio inviato a <code>{target_id}</code>.",
+                    parse_mode=ParseMode.HTML,
+                )
             except Exception as err:
                 await update.message.reply_text(f"❌ Errore: {err}")
-            return True
-
-        if awaiting == "admin_block_uid":
-            if not self._is_admin(user.id):
-                context.user_data.pop("awaiting_input", None)
-                return True
-            if not text.isdigit():
-                await update.message.reply_text(
-                    "ID non valido. Inserisci un ID Telegram numerico.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
-                    ]]),
-                )
-                return True
-            target_id = int(text)
-            context.user_data.pop("awaiting_input", None)
-            if self._is_admin(target_id):
-                await update.message.reply_text("❌ Non puoi bloccare un admin.")
-                return True
-            await self._storage.set_blocked(target_id, True)
-            await update.message.reply_text(f"🚫 Utente <code>{target_id}</code> bloccato.", parse_mode=ParseMode.HTML)
-            return True
-
-        if awaiting == "admin_unblock_uid":
-            if not self._is_admin(user.id):
-                context.user_data.pop("awaiting_input", None)
-                return True
-            if not text.isdigit():
-                await update.message.reply_text(
-                    "ID non valido. Inserisci un ID Telegram numerico.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
-                    ]]),
-                )
-                return True
-            target_id = int(text)
-            context.user_data.pop("awaiting_input", None)
-            await self._storage.set_blocked(target_id, False)
-            await update.message.reply_text(f"✅ Utente <code>{target_id}</code> sbloccato.", parse_mode=ParseMode.HTML)
             return True
 
         context.user_data.pop("awaiting_input", None)
@@ -1417,7 +1356,7 @@ class FuelPriceTelegramBot:
 
         # Fallback: la zone search non include services → chiamate individuali
         if not matched and zone_results and not any(s.get("services") for s in zone_results):
-            nearest = self._get_station_cache().nearest(lat, lon, limit=8, max_radius_km=radius_km)
+            nearest = self._get_station_cache().nearest(lat, lon, limit=20, max_radius_km=radius_km)
             for cache_s in nearest:
                 sid = str(cache_s.get("id", ""))
                 if not sid:
@@ -1475,6 +1414,44 @@ class FuelPriceTelegramBot:
             nav.append(InlineKeyboardButton("◀️ Prec", callback_data=f"{CB_ADMIN_LIST}{page - 1}"))
         if start + _ADMIN_PAGE_SIZE < total:
             nav.append(InlineKeyboardButton("Succ ▶️", callback_data=f"{CB_ADMIN_LIST}{page + 1}"))
+        if nav:
+            rows.append(nav)
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _cb_admin_msg_list(self, query, page: int) -> None:
+        """Lista utenti cliccabile per inviare un messaggio diretto."""
+        all_users = self._storage.all_users()
+        total = len(all_users)
+        start = page * _ADMIN_PAGE_SIZE
+        chunk = all_users[start:start + _ADMIN_PAGE_SIZE]
+
+        if not chunk:
+            await query.edit_message_text("Nessun utente.")
+            return
+
+        lines = [f"✉️ <b>Seleziona destinatario</b> ({total} utenti) — pagina {page + 1}\n"]
+        rows: list[list[InlineKeyboardButton]] = []
+        for u in chunk:
+            uname = f"@{u.username}" if u.username else str(u.user_id)
+            blocked_label = " 🚫" if u.blocked else ""
+            is_admin_user = u.user_id in self._admin_ids
+            role_label = " 👑" if is_admin_user else blocked_label
+            lines.append(f"• <b>{escape(u.display_name)}</b>{role_label} <code>{u.user_id}</code> · {escape(uname)}")
+            rows.append([InlineKeyboardButton(
+                f"✉️ {u.display_name[:22]}",
+                callback_data=f"{CB_ADMIN_SELECT_MSG}{u.user_id}",
+            )])
+
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ Prec", callback_data=f"{CB_ADMIN_MSG_LIST}{page - 1}"))
+        if start + _ADMIN_PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Succ ▶️", callback_data=f"{CB_ADMIN_MSG_LIST}{page + 1}"))
         if nav:
             rows.append(nav)
 
@@ -1635,7 +1612,7 @@ class FuelPriceTelegramBot:
 
 def _station_has_service(station: dict, service_id: str) -> bool:
     """Controlla se una stazione ha un determinato servizio (per ID)."""
-    for svc in station.get("services", []):
+    for svc in (station.get("services") or []):
         if isinstance(svc, dict):
             if str(svc.get("id", "")) == service_id:
                 return True
