@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from telegram import (
@@ -46,11 +47,15 @@ BTN_SET_STATION = "⭐ Imposta stazione"
 BTN_SEARCH = "🔍 Cerca stazioni"
 BTN_NEARBY = "📍 Stazioni vicine"
 BTN_BEST = "🏆 Miglior prezzo"
+BTN_SERVICES = "🔎 Servizi vicini"
+BTN_SETTINGS_MENU = "⚙️ Impostazioni"
+BTN_HELP = "❓ Aiuto"
+BTN_ADMIN = "👑 Admin"
+# Kept for backward-compatibility (inline Annulla buttons are preferred now)
 BTN_NOTIFY = "🔔 Imposta notifica"
 BTN_DISABLE_NOTIFY = "🔕 Disattiva notifiche"
 BTN_MY_SETTINGS = "⚙️ Le mie impostazioni"
 BTN_REMOVE_STATION = "🗑 Rimuovi stazione"
-BTN_HELP = "❓ Aiuto"
 BTN_CANCEL = "✖️ Annulla"
 
 # ── Callback data prefixes (max 64 byte totali per Telegram) ──────────────────
@@ -58,8 +63,21 @@ CB_SET_STATION = "st:set:"    # st:set:{station_id}
 CB_SHOW_PRICES = "st:pr:"     # st:pr:{station_id}
 CB_BEST_FUEL = "bf:"          # bf:{fuel_name}
 CB_BEST_MODE = "bm:"          # bm:{self|servito}
+CB_SERVICE = "svc:"           # svc:{service_id}
 CB_REMOVE_OK = "rm:ok"
 CB_REMOVE_NO = "rm:no"
+CB_GUIDE_SEARCH = "guide:search"
+CB_GUIDE_NEARBY = "guide:nearby"
+CB_CANCEL_INPUT = "cancel:input"
+CB_ADMIN_LIST = "adm:list:"    # adm:list:{page}
+CB_ADMIN_BLOCK = "adm:blk:"    # adm:blk:{user_id}
+CB_ADMIN_UNBLOCK = "adm:ublk:" # adm:ublk:{user_id}
+CB_SETTINGS_MENU = "cfg:menu"
+CB_SETTINGS_NOTIFY = "cfg:notify"
+CB_SETTINGS_DISABLE = "cfg:disable"
+CB_SETTINGS_REMOVE = "cfg:remove"
+
+_ADMIN_PAGE_SIZE = 5
 
 # ── Carburanti disponibili per la tastiera inline ─────────────────────────────
 _FUEL_OPTIONS: list[tuple[str, str]] = [
@@ -69,6 +87,16 @@ _FUEL_OPTIONS: list[tuple[str, str]] = [
     ("⚡ Metano", "metano"),
     ("🔋 Elettrico", "elettrico"),
     ("🚗 AdBlue", "adblue"),
+]
+
+# ── Servizi disponibili per la tastiera inline ────────────────────────────────
+_SERVICE_OPTIONS: list[tuple[str, str]] = [
+    ("🚿 Autolavaggio", "10"),
+    ("⚡ Ricarica elettrica", "11"),
+    ("🏧 Bancomat", "6"),
+    ("☕ Food & Beverage", "1"),
+    ("🔧 Officina", "2"),
+    ("♿ Accesso disabili", "7"),
 ]
 
 _START_MESSAGE = (
@@ -87,9 +115,10 @@ _START_MESSAGE = (
 
 
 class FuelPriceTelegramBot:
-    def __init__(self, token: str, data_dir: Path) -> None:
+    def __init__(self, token: str, data_dir: Path, admin_ids: set[int] | None = None) -> None:
         self._token = token
         self._data_dir = data_dir
+        self._admin_ids: set[int] = admin_ids or set()
         self._session: aiohttp.ClientSession | None = None
         self._client: OsservaprezziClient | None = None
         self._storage = UserStorage(data_dir)
@@ -117,6 +146,11 @@ class FuelPriceTelegramBot:
         self.app.add_handler(CommandHandler("notifica", self.cmd_notify))
         self.app.add_handler(CommandHandler("no_notifica", self.cmd_disable_notify))
         self.app.add_handler(CommandHandler("mia", self.cmd_my_settings))
+        self.app.add_handler(CommandHandler("admin", self.cmd_admin))
+        self.app.add_handler(CommandHandler("broadcast", self.cmd_broadcast))
+        self.app.add_handler(CommandHandler("msg", self.cmd_msg))
+        self.app.add_handler(CommandHandler("block", self.cmd_block))
+        self.app.add_handler(CommandHandler("unblock", self.cmd_unblock))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
         self.app.add_handler(MessageHandler(filters.LOCATION, self.handle_location))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
@@ -164,19 +198,36 @@ class FuelPriceTelegramBot:
 
     # ── Keyboards ─────────────────────────────────────────────────────────────
 
-    def _main_keyboard(self) -> ReplyKeyboardMarkup:
-        return ReplyKeyboardMarkup(
-            [
-                [BTN_PRICES, BTN_SET_STATION],
-                [BTN_SEARCH, BTN_NEARBY],
-                [BTN_BEST, KeyboardButton("📍 Condividi posizione", request_location=True)],
-                [BTN_NOTIFY, BTN_DISABLE_NOTIFY],
-                [BTN_MY_SETTINGS, BTN_REMOVE_STATION],
-                [BTN_HELP, BTN_CANCEL],
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=False,
-        )
+    def _main_keyboard(self, is_admin: bool = False) -> ReplyKeyboardMarkup:
+        rows: list = [
+            [BTN_PRICES, BTN_SET_STATION],
+            [BTN_SEARCH, BTN_NEARBY],
+            [BTN_BEST, BTN_SERVICES],
+            [KeyboardButton("📍 Condividi posizione", request_location=True)],
+            [BTN_SETTINGS_MENU, BTN_HELP],
+        ]
+        if is_admin:
+            rows.append([BTN_ADMIN])
+        return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+    def _settings_inline_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
+        """Tastiera inline del sottomenu Impostazioni."""
+        settings = self._storage.get(user_id)
+        rows: list[list[InlineKeyboardButton]] = []
+        if settings.station_id:
+            rows.append([
+                InlineKeyboardButton("📋 Vedi prezzi", callback_data=f"{CB_SHOW_PRICES}{settings.station_id}"),
+                InlineKeyboardButton("🗑 Rimuovi stazione", callback_data=CB_SETTINGS_REMOVE),
+            ])
+        if settings.notify_time:
+            rows.append([
+                InlineKeyboardButton("🔕 Disattiva notifiche", callback_data=CB_SETTINGS_DISABLE),
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton("🔔 Imposta notifica", callback_data=CB_SETTINGS_NOTIFY),
+            ])
+        return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def _station_action_keyboard(station_id: str) -> InlineKeyboardMarkup:
@@ -230,28 +281,81 @@ class FuelPriceTelegramBot:
             InlineKeyboardButton("❌ Annulla", callback_data=CB_REMOVE_NO),
         ]])
 
+    @staticmethod
+    def _services_keyboard() -> InlineKeyboardMarkup:
+        """Selettore tipo di servizio da cercare."""
+        rows = []
+        for i in range(0, len(_SERVICE_OPTIONS), 2):
+            row = [
+                InlineKeyboardButton(label, callback_data=f"{CB_SERVICE}{sid}")
+                for label, sid in _SERVICE_OPTIONS[i:i + 2]
+            ]
+            rows.append(row)
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def _cancel_keyboard() -> InlineKeyboardMarkup:
+        """Pulsante inline Annulla per i prompt di input testuale."""
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
+        ]])
+
+    async def _ask_with_cancel(self, update: Update, text: str) -> None:
+        """Invia un prompt di input con pulsante inline ❌ Annulla."""
+        if not update.message:
+            return
+        await update.message.reply_text(text, reply_markup=self._cancel_keyboard())
+
     async def _reply_with_keyboard(
         self, update: Update, text: str, parse_mode: str | None = None
     ) -> None:
         if not update.message:
             return
+        user = update.effective_user
+        is_admin = user is not None and self._is_admin(user.id)
         await update.message.reply_text(
             text=text,
             parse_mode=parse_mode,
-            reply_markup=self._main_keyboard(),
+            reply_markup=self._main_keyboard(is_admin=is_admin),
             disable_web_page_preview=True,
         )
 
     # ── Commands ──────────────────────────────────────────────────────────────
 
+    def _is_admin(self, user_id: int) -> bool:
+        return user_id in self._admin_ids
+
+    async def _check_not_blocked(self, update: Update) -> bool:
+        """Ritorna False e risponde se l'utente è bloccato."""
+        user = update.effective_user
+        if not user:
+            return False
+        if self._storage.is_blocked(user.id):
+            if update.message:
+                await update.message.reply_text("Non sei autorizzato a usare questo bot.")
+            elif update.callback_query:
+                await update.callback_query.answer("Non autorizzato.", show_alert=True)
+            return False
+        return True
+
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
-        if update.message:
-            await update.message.reply_text(
-                _START_MESSAGE,
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._main_keyboard(),
-            )
+        user = update.effective_user
+        if not user or not update.message:
+            return
+        if not await self._check_not_blocked(update):
+            return
+
+        is_new = await self._storage.upsert_user_info(
+            user.id, user.username, user.full_name
+        )
+        if is_new:
+            await self._notify_admin_new_user(context, user)
+
+        await update.message.reply_text(
+            _START_MESSAGE,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._main_keyboard(is_admin=self._is_admin(user.id)),
+        )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.cmd_start(update, context)
@@ -300,8 +404,12 @@ class FuelPriceTelegramBot:
         station_id = self._resolve_station_id(user.id, context.args)
         if not station_id:
             await update.message.reply_text(
-                "Nessuna stazione impostata.\n"
-                "Usa /station <id> oppure /prezzi <id>."
+                "⛽ Non hai ancora una stazione preferita.\n\n"
+                "Cercane una per nome o comune, oppure trova quelle vicine a te.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Cerca per nome", callback_data=CB_GUIDE_SEARCH)],
+                    [InlineKeyboardButton("📍 Stazioni vicine a me", callback_data=CB_GUIDE_NEARBY)],
+                ]),
             )
             return
 
@@ -334,8 +442,15 @@ class FuelPriceTelegramBot:
         lat, lon, radius = await self._resolve_location_and_radius(update, context)
         if lat is None or lon is None:
             await update.message.reply_text(
-                "📍 Condividi prima la posizione oppure usa:\n"
-                "/vicino <lat> <lon> [raggio_km]"
+                "📍 Non ho ancora la tua posizione.\n\n"
+                "Usa il pulsante qui sotto per condividerla, oppure scrivi:\n"
+                "<code>/vicino &lt;lat&gt; &lt;lon&gt;</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("📍 Condividi posizione", request_location=True)]],
+                    resize_keyboard=True,
+                    one_time_keyboard=True,
+                ),
             )
             return
 
@@ -504,6 +619,131 @@ class FuelPriceTelegramBot:
         elif data == CB_REMOVE_NO:
             await query.edit_message_text("Operazione annullata.")
 
+        elif data == CB_CANCEL_INPUT:
+            context.user_data.pop("awaiting_input", None)
+            context.user_data.pop("best_fuel", None)
+            await query.edit_message_text("✖️ Operazione annullata.")
+
+        elif data == CB_GUIDE_SEARCH:
+            context.user_data["awaiting_input"] = "search_query"
+            await query.edit_message_text(
+                "🔍 Scrivi il nome, comune o brand da cercare.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
+                ]]),
+            )
+
+        elif data.startswith(CB_ADMIN_LIST):
+            if not self._is_admin(user.id):
+                await query.answer("Non autorizzato.", show_alert=True)
+                return
+            page = int(data[len(CB_ADMIN_LIST):] or "0")
+            await self._cb_admin_list(query, page)
+
+        elif data.startswith(CB_ADMIN_BLOCK):
+            if not self._is_admin(user.id):
+                await query.answer("Non autorizzato.", show_alert=True)
+                return
+            target_id = int(data[len(CB_ADMIN_BLOCK):])
+            if self._is_admin(target_id):
+                await query.answer("Non puoi bloccare un admin.", show_alert=True)
+                return
+            await self._storage.set_blocked(target_id, True)
+            await query.answer(f"Utente {target_id} bloccato.")
+            page = context.user_data.get("admin_list_page", 0)
+            await self._cb_admin_list(query, page)
+
+        elif data.startswith(CB_ADMIN_UNBLOCK):
+            if not self._is_admin(user.id):
+                await query.answer("Non autorizzato.", show_alert=True)
+                return
+            target_id = int(data[len(CB_ADMIN_UNBLOCK):])
+            await self._storage.set_blocked(target_id, False)
+            await query.answer(f"Utente {target_id} sbloccato.")
+            page = context.user_data.get("admin_list_page", 0)
+            await self._cb_admin_list(query, page)
+
+        elif data.startswith(CB_SERVICE):
+            service_id = data[len(CB_SERVICE):]
+            service_label = next(
+                (lbl for lbl, sid in _SERVICE_OPTIONS if sid == service_id), "Servizio"
+            )
+            settings = self._storage.get(user.id)
+            if settings.location_lat is None or settings.location_lon is None:
+                await query.edit_message_text(
+                    "📍 Condividi prima la posizione con il pulsante dedicato."
+                )
+                return
+            await query.edit_message_text(
+                f"🔍 Cerco <b>{escape(service_label)}</b> nelle vicinanze…",
+                parse_mode=ParseMode.HTML,
+            )
+            stations = await self._find_stations_with_service(
+                settings.location_lat, settings.location_lon, service_id
+            )
+            text = _format_service_results(stations, service_label)
+            keyboard = self._stations_list_keyboard(stations) if stations else None
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+        elif data == CB_GUIDE_NEARBY:
+            settings = self._storage.get(user.id)
+            if settings.location_lat is None or settings.location_lon is None:
+                await query.edit_message_text(
+                    "📍 Non ho ancora la tua posizione.\n"
+                    "Usa il pulsante 📍 Condividi posizione nella tastiera."
+                )
+                return
+            nearby = self._get_station_cache().nearest(
+                settings.location_lat, settings.location_lon, limit=5, max_radius_km=5
+            )
+            text = "📍 <b>Posizione salvata!</b>\n\n" + format_nearest_stations(nearby)
+            keyboard = self._stations_list_keyboard(nearby) if nearby else None
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+        elif data == CB_SETTINGS_MENU:
+            settings = self._storage.get(user.id)
+            station_line = (
+                f"<code>{settings.station_id}</code>" if settings.station_id else "non impostata"
+            )
+            if settings.location_lat is not None and settings.location_lon is not None:
+                location_line = f"{settings.location_lat:.5f}, {settings.location_lon:.5f}"
+            else:
+                location_line = "non condivisa"
+            await query.edit_message_text(
+                "⚙️ <b>Impostazioni</b>\n\n"
+                f"⛽ Stazione: {station_line}\n"
+                f"📍 Posizione: {location_line}\n"
+                f"🔔 Notifica: {settings.notify_time or 'disattivata'}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_inline_keyboard(user.id),
+            )
+
+        elif data == CB_SETTINGS_NOTIFY:
+            context.user_data["awaiting_input"] = "notify_time"
+            await query.edit_message_text(
+                "🔔 Inserisci l'orario della notifica in formato HH:MM (es. 08:30).",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Annulla", callback_data=CB_CANCEL_INPUT),
+                ]]),
+            )
+
+        elif data == CB_SETTINGS_DISABLE:
+            await self._storage.update_notify_time(user.id, None)
+            await query.edit_message_text(
+                "🔕 Notifiche giornaliere disattivate.",
+                reply_markup=self._settings_inline_keyboard(user.id),
+            )
+
+        elif data == CB_SETTINGS_REMOVE:
+            settings = self._storage.get(user.id)
+            if not settings.station_id:
+                await query.edit_message_text("Nessuna stazione impostata.")
+                return
+            await query.edit_message_text(
+                "🗑 Sei sicuro di voler rimuovere la stazione preferita?",
+                reply_markup=self._remove_confirm_keyboard(),
+            )
+
     async def _cb_set_station(self, query, user_id: int, station_id: str) -> None:
         try:
             station_data = await self._get_client().fetch_station(station_id)
@@ -576,6 +816,8 @@ class FuelPriceTelegramBot:
         del context
         if not update.message or not update.effective_user or not update.message.location:
             return
+        if not await self._check_not_blocked(update):
+            return
 
         lat = update.message.location.latitude
         lon = update.message.location.longitude
@@ -590,6 +832,8 @@ class FuelPriceTelegramBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         if not update.message or not update.effective_user:
+            return
+        if not await self._check_not_blocked(update):
             return
 
         text = (update.message.text or "").strip()
@@ -612,6 +856,9 @@ class FuelPriceTelegramBot:
             BTN_SEARCH, "Cerca stazioni",
             BTN_NEARBY, "Stazioni vicine",
             BTN_BEST, "Miglior prezzo",
+            BTN_SERVICES, "Servizi vicini",
+            BTN_SETTINGS_MENU, "Impostazioni",
+            BTN_ADMIN, "Admin",
             BTN_NOTIFY, "Imposta notifica",
             BTN_DISABLE_NOTIFY, "Disattiva notifiche",
             BTN_MY_SETTINGS, "Le mie impostazioni",
@@ -632,18 +879,12 @@ class FuelPriceTelegramBot:
 
         elif text in (BTN_SET_STATION, "Imposta stazione"):
             context.user_data["awaiting_input"] = "station_id"
-            await self._reply_with_keyboard(
-                update,
-                "🔢 Inserisci l'ID stazione numerico (es. 12345).\n"
-                "Digita ✖️ Annulla per uscire.",
-            )
+            await self._ask_with_cancel(update, "🔢 Inserisci l'ID stazione numerico (es. 12345).")
 
         elif text in (BTN_SEARCH, "Cerca stazioni"):
             context.user_data["awaiting_input"] = "search_query"
-            await self._reply_with_keyboard(
-                update,
-                "🔍 Scrivi un testo da cercare (nome, comune, indirizzo, brand).\n"
-                "Digita ✖️ Annulla per uscire.",
+            await self._ask_with_cancel(
+                update, "🔍 Scrivi un testo da cercare (nome, comune, indirizzo, brand)."
             )
 
         elif text in (BTN_NEARBY, "Stazioni vicine"):
@@ -668,10 +909,8 @@ class FuelPriceTelegramBot:
 
         elif text in (BTN_NOTIFY, "Imposta notifica"):
             context.user_data["awaiting_input"] = "notify_time"
-            await self._reply_with_keyboard(
-                update,
-                "🔔 Inserisci l'orario della notifica in formato HH:MM (es. 08:30).\n"
-                "Digita ✖️ Annulla per uscire.",
+            await self._ask_with_cancel(
+                update, "🔔 Inserisci l'orario della notifica in formato HH:MM (es. 08:30)."
             )
 
         elif text in (BTN_DISABLE_NOTIFY, "Disattiva notifiche"):
@@ -692,8 +931,49 @@ class FuelPriceTelegramBot:
                 reply_markup=self._remove_confirm_keyboard(),
             )
 
+        elif text in (BTN_SERVICES, "Servizi vicini"):
+            user = update.effective_user
+            if user:
+                settings = self._storage.get(user.id)
+                if settings.location_lat is None or settings.location_lon is None:
+                    await self._reply_with_keyboard(
+                        update,
+                        "📍 Per cercare servizi vicini, condividi prima la posizione "
+                        "con il pulsante 📍 Condividi posizione.",
+                    )
+                    return
+            await update.message.reply_text(
+                "🔎 <b>Cerca servizio</b>\n\nQuale servizio stai cercando?",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._services_keyboard(),
+            )
+
         elif text in (BTN_HELP, "Aiuto"):
             await self.cmd_start(update, context)
+
+        elif text in (BTN_SETTINGS_MENU, "Impostazioni"):
+            user = update.effective_user
+            if not user:
+                return
+            settings = self._storage.get(user.id)
+            station_line = (
+                f"<code>{settings.station_id}</code>" if settings.station_id else "non impostata"
+            )
+            if settings.location_lat is not None and settings.location_lon is not None:
+                location_line = f"{settings.location_lat:.5f}, {settings.location_lon:.5f}"
+            else:
+                location_line = "non condivisa"
+            await update.message.reply_text(
+                "⚙️ <b>Impostazioni</b>\n\n"
+                f"⛽ Stazione: {station_line}\n"
+                f"📍 Posizione: {location_line}\n"
+                f"🔔 Notifica: {settings.notify_time or 'disattivata'}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._settings_inline_keyboard(user.id),
+            )
+
+        elif text == BTN_ADMIN:
+            await self.cmd_admin(update, context)
 
         elif text.isdigit():
             # Numero digitato direttamente → imposta come stazione
@@ -910,11 +1190,263 @@ class FuelPriceTelegramBot:
             raise RuntimeError("Cache stazioni non inizializzata")
         return self._station_cache
 
+    async def _find_stations_with_service(
+        self, lat: float, lon: float, service_id: str, radius_km: float = 5.0
+    ) -> list[dict]:
+        """
+        Cerca stazioni nel raggio indicato che offrono il servizio richiesto.
+        Prima tenta con la zone search (un'unica chiamata API veloce).
+        Se la zone search non restituisce il campo services, effettua chiamate
+        individuali sulle 8 stazioni più vicine come fallback.
+        """
+        zone_results: list[dict] = []
+        try:
+            zone_results = await self._get_client().search_zone(lat, lon, radius_km=radius_km)
+        except OsservaprezziError:
+            pass
+
+        matched = [s for s in zone_results if _station_has_service(s, service_id)]
+
+        # Fallback: la zone search non include services → chiamate individuali
+        if not matched and zone_results and not any(s.get("services") for s in zone_results):
+            nearest = self._get_station_cache().nearest(lat, lon, limit=8, max_radius_km=radius_km)
+            for cache_s in nearest:
+                sid = str(cache_s.get("id", ""))
+                if not sid:
+                    continue
+                try:
+                    data = await self._get_client().fetch_station(sid)
+                    if _station_has_service(data, service_id):
+                        data["distance_km"] = cache_s.get("distance_km")
+                        matched.append(data)
+                except OsservaprezziError:
+                    continue
+
+        return matched[:5]
+
+    async def _cb_admin_list(self, query, page: int) -> None:
+        """Mostra la lista utenti paginata con azioni blocca/sblocca."""
+        all_users = self._storage.all_users()
+        total = len(all_users)
+        start = page * _ADMIN_PAGE_SIZE
+        chunk = all_users[start:start + _ADMIN_PAGE_SIZE]
+
+        if not chunk:
+            await query.edit_message_text("Nessun utente.")
+            return
+
+        lines = [f"👥 <b>Utenti</b> ({total} totali) — pagina {page + 1}\n"]
+        rows: list[list[InlineKeyboardButton]] = []
+
+        for u in chunk:
+            uname = f"@{u.username}" if u.username else str(u.user_id)
+            station = f"⛽ {u.station_id}" if u.station_id else "nessuna stazione"
+            notify = f"🔔 {u.notify_time}" if u.notify_time else ""
+            is_admin_user = u.user_id in self._admin_ids
+            role_label = " 👑" if is_admin_user else (" 🚫" if u.blocked else "")
+            lines.append(
+                f"• <b>{escape(u.display_name)}</b>{role_label} "
+                f"<code>{u.user_id}</code>\n"
+                f"  {escape(uname)} · {station} {notify}"
+            )
+            if not is_admin_user:
+                if u.blocked:
+                    rows.append([InlineKeyboardButton(
+                        f"✅ Sblocca {u.display_name[:15]}",
+                        callback_data=f"{CB_ADMIN_UNBLOCK}{u.user_id}",
+                    )])
+                else:
+                    rows.append([InlineKeyboardButton(
+                        f"🚫 Blocca {u.display_name[:15]}",
+                        callback_data=f"{CB_ADMIN_BLOCK}{u.user_id}",
+                    )])
+
+        # Navigazione pagine
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ Prec", callback_data=f"{CB_ADMIN_LIST}{page - 1}"))
+        if start + _ADMIN_PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Succ ▶️", callback_data=f"{CB_ADMIN_LIST}{page + 1}"))
+        if nav:
+            rows.append(nav)
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    # ── Admin commands ────────────────────────────────────────────────────────
+
+    async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        user = update.effective_user
+        if not user or not update.message:
+            return
+        if not self._is_admin(user.id):
+            await update.message.reply_text("Non autorizzato.")
+            return
+
+        all_users = self._storage.all_users()
+        total = len(all_users)
+        blocked = sum(1 for u in all_users if u.blocked)
+        with_notify = sum(1 for u in all_users if u.notify_time)
+
+        text = (
+            "👑 <b>Pannello Admin</b>\n\n"
+            f"👥 Utenti totali: <b>{total}</b>\n"
+            f"🚫 Bloccati: <b>{blocked}</b>\n"
+            f"🔔 Con notifica attiva: <b>{with_notify}</b>"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 Lista utenti", callback_data=f"{CB_ADMIN_LIST}0")],
+        ])
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    async def cmd_broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not user or not update.message:
+            return
+        if not self._is_admin(user.id):
+            return
+        if not context.args:
+            await update.message.reply_text("Uso: /broadcast <messaggio>")
+            return
+
+        message = " ".join(context.args)
+        all_users = self._storage.all_users()
+        sent = 0
+        failed = 0
+        for u in all_users:
+            if u.blocked or u.user_id == user.id:
+                continue
+            try:
+                await context.bot.send_message(
+                    chat_id=u.user_id,
+                    text=f"📢 <b>Messaggio dal gestore del bot</b>\n\n{escape(message)}",
+                    parse_mode=ParseMode.HTML,
+                )
+                sent += 1
+            except Exception:
+                failed += 1
+
+        await update.message.reply_text(
+            f"📢 Broadcast completato.\n✅ Inviati: {sent} · ❌ Falliti: {failed}"
+        )
+
+    async def cmd_msg(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not user or not update.message:
+            return
+        if not self._is_admin(user.id):
+            return
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text("Uso: /msg <user_id> <messaggio>")
+            return
+
+        target_id_str = context.args[0]
+        if not target_id_str.isdigit():
+            await update.message.reply_text("user_id non valido.")
+            return
+
+        target_id = int(target_id_str)
+        message = " ".join(context.args[1:])
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"✉️ <b>Messaggio dal gestore del bot</b>\n\n{escape(message)}",
+                parse_mode=ParseMode.HTML,
+            )
+            await update.message.reply_text(f"✅ Messaggio inviato a {target_id}.")
+        except Exception as err:
+            await update.message.reply_text(f"❌ Errore: {err}")
+
+    async def cmd_block(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not user or not update.message:
+            return
+        if not self._is_admin(user.id):
+            return
+        if not context.args or not context.args[0].isdigit():
+            await update.message.reply_text("Uso: /block <user_id>")
+            return
+        target_id = int(context.args[0])
+        if self._is_admin(target_id):
+            await update.message.reply_text("❌ Non puoi bloccare un admin.")
+            return
+        await self._storage.set_blocked(target_id, True)
+        await update.message.reply_text(f"🚫 Utente {target_id} bloccato.")
+
+    async def cmd_unblock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not user or not update.message:
+            return
+        if not self._is_admin(user.id):
+            return
+        if not context.args or not context.args[0].isdigit():
+            await update.message.reply_text("Uso: /unblock <user_id>")
+            return
+        target_id = int(context.args[0])
+        await self._storage.set_blocked(target_id, False)
+        await update.message.reply_text(f"✅ Utente {target_id} sbloccato.")
+
+    async def _notify_admin_new_user(
+        self, context: ContextTypes.DEFAULT_TYPE, user: Any
+    ) -> None:
+        if not self._admin_ids:
+            return
+        username_line = f"@{user.username}" if user.username else "—"
+        text = (
+            "👤 <b>Nuovo utente!</b>\n\n"
+            f"Nome: {escape(user.full_name or '—')}\n"
+            f"Username: {username_line}\n"
+            f"ID: <code>{user.id}</code>"
+        )
+        for admin_id in self._admin_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id, text=text, parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
     def run(self) -> None:
         self.app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
 
 
 # ── Module-level helper ────────────────────────────────────────────────────────
+
+def _station_has_service(station: dict, service_id: str) -> bool:
+    """Controlla se una stazione ha un determinato servizio (per ID)."""
+    for svc in station.get("services", []):
+        if isinstance(svc, dict):
+            if str(svc.get("id", "")) == service_id:
+                return True
+        elif str(svc) == service_id:
+            return True
+    return False
+
+
+def _format_service_results(stations: list[dict], service_label: str) -> str:
+    """Formatta i risultati di una ricerca per servizio."""
+    if not stations:
+        return (
+            f"Nessuna stazione con <b>{escape(service_label)}</b> "
+            f"trovata nel raggio di 5 km."
+        )
+    lines = [f"🔎 <b>Stazioni con {escape(service_label)}</b>", ""]
+    for i, s in enumerate(stations, 1):
+        name = str(s.get("nomeImpianto") or s.get("name") or "Stazione")
+        brand = str(s.get("brand") or "n/d")
+        addr = str(s.get("address") or "")
+        distance = s.get("distance") or s.get("distance_km")
+        dist_text = f"{float(distance):.2f} km" if distance is not None else "n/d"
+        lines.append(f"{i}. <b>{escape(name)}</b> · {escape(brand)}")
+        if addr:
+            lines.append(f"   📌 {escape(addr)}")
+        lines.append(f"   📏 {dist_text}")
+    return "\n".join(lines)
+
 
 def _extract_best_station_id(
     zone_results: list[dict],

@@ -80,11 +80,11 @@ def summarize_station(station_data: dict[str, Any], csv_station: dict[str, Any] 
     if site:
         lines.append(f"Sito: {escape(str(site))}")
 
-    status = compute_opening_status(station_data.get("orariapertura", []))
+    status = compute_opening_status(station_data.get("orariapertura") or [])
     if status:
         lines.append(status)
 
-    services = station_data.get("services", [])
+    services = station_data.get("services") or []
     service_labels = _extract_service_labels(services)
     if service_labels:
         lines.append("Servizi: " + ", ".join(escape(label) for label in service_labels))

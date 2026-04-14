@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -19,8 +20,16 @@ def main() -> None:
     if not token:
         raise SystemExit("Variabile TELEGRAM_BOT_TOKEN non impostata")
 
+    # Python 3.12+ non crea più automaticamente un event loop con
+    # asyncio.get_event_loop(). python-telegram-bot lo chiama internamente,
+    # quindi va impostato esplicitamente prima di istanziare il bot.
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+    admin_ids_raw = os.getenv("ADMIN_TELEGRAM_ID", "")
+    admin_ids = {int(x.strip()) for x in admin_ids_raw.split(",") if x.strip().isdigit()}
+
     data_dir = Path(os.getenv("BOT_DATA_DIR", ".bot_data"))
-    bot = FuelPriceTelegramBot(token=token, data_dir=data_dir)
+    bot = FuelPriceTelegramBot(token=token, data_dir=data_dir, admin_ids=admin_ids)
     bot.run()
 
 

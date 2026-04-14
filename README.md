@@ -26,6 +26,7 @@ Bot Telegram per monitorare i prezzi carburante in Italia in tempo reale, con da
 - 📍 Trova le **stazioni vicine** dalla posizione condivisa su Telegram
 - 🏆 Trova il **miglior prezzo** in zona filtrando per carburante e modalità
 - 🔔 Invia una **notifica giornaliera** automatica all'orario scelto
+- 👑 **Pannello admin**: lista utenti, blocco/sblocco, broadcast, messaggi diretti
 
 Dati da:
 - **API Osservaprezzi** (prezzi e dettagli live)
@@ -46,6 +47,14 @@ Dati da:
 - `/no_notifica` disattiva notifiche
 - `/mia` mostra la configurazione utente corrente
 
+### Comandi admin (solo per gli ID in `ADMIN_TELEGRAM_ID`)
+
+- `/admin` apre il pannello admin con statistiche e lista utenti
+- `/broadcast <messaggio>` invia un messaggio a tutti gli utenti non bloccati
+- `/msg <user_id> <messaggio>` invia un messaggio diretto a un utente
+- `/block <user_id>` blocca un utente
+- `/unblock <user_id>` sblocca un utente
+
 Esempi rapidi:
 
 ```text
@@ -59,33 +68,38 @@ Esempi rapidi:
 
 ## Uso con tastiera (senza slash commands)
 
-Il bot è utilizzabile completamente da tastiera Telegram (pulsanti reply keyboard):
+Il bot è completamente utilizzabile tramite pulsanti (reply keyboard). La tastiera si adatta al ruolo dell'utente.
+
+### Tastiera utente
 
 | Pulsante | Funzione |
 |---|---|
 | `📋 Prezzi stazione` | Prezzi della stazione preferita |
 | `⭐ Imposta stazione` | Imposta stazione preferita per ID |
-| `🔍 Cerca stazioni` | Ricerca per testo |
+| `🔍 Cerca stazioni` | Ricerca per nome, comune, brand |
 | `📍 Stazioni vicine` | Stazioni nel raggio 5 km dalla posizione salvata |
 | `🏆 Miglior prezzo` | Selettore carburante + modalità via pulsanti inline |
+| `🔎 Servizi vicini` | Cerca autolavaggi, ricarica elettrica, bancomat e altri servizi |
 | `📍 Condividi posizione` | Salva la posizione e mostra le stazioni vicine |
-| `🔔 Imposta notifica` | Orario notifica giornaliera |
-| `🔕 Disattiva notifiche` | Disattiva notifiche |
-| `⚙️ Le mie impostazioni` | Riepilogo configurazione utente |
-| `🗑 Rimuovi stazione` | Rimuove la stazione preferita (chiede conferma) |
+| `⚙️ Impostazioni` | Riepilogo configurazione + notifiche e rimozione stazione |
 | `❓ Aiuto` | Mostra il messaggio di benvenuto |
-| `✖️ Annulla` | Annulla l'operazione corrente |
 
-I comandi `/...` restano disponibili come alternativa.
+### Pulsante admin (visibile solo agli admin)
 
-### Tastiere inline
+| Pulsante | Funzione |
+|---|---|
+| `👑 Admin` | Apre il pannello admin con statistiche, lista utenti, blocco/sblocco |
 
-Oltre alla reply keyboard, il bot usa tastiere inline contestuali:
+### Tastiere inline contestuali
 
-- **Risultati ricerca / Stazioni vicine**: pulsanti `⭐ Imposta` e `📋 Prezzi` per ogni stazione
-- **Prezzi stazione**: pulsante `⭐ Imposta preferita`
+- **Risultati ricerca / Stazioni vicine**: `⭐ Imposta` e `📋 Prezzi` per ogni stazione
+- **⚙️ Impostazioni**: mostra stazione/posizione/notifica correnti e offre `📋 Vedi prezzi`, `🗑 Rimuovi stazione`, `🔔/🔕 Notifiche`
 - **Miglior prezzo**: selettore carburante → selettore self/servito → risultato con `⭐ Imposta`
+- **Servizi vicini**: selezione tipo servizio → lista stazioni con quel servizio
 - **Rimuovi stazione**: richiede conferma con `✅ Conferma` / `❌ Annulla`
+- **Ogni prompt di testo** (inserisci ID, cerca, orario notifica): pulsante inline `❌ Annulla`
+
+I comandi `/...` restano disponibili come alternativa ai pulsanti.
 
 ## Prerequisiti
 
@@ -98,7 +112,6 @@ Oltre alla reply keyboard, il bot usa tastiere inline contestuali:
 1. Crea ambiente virtuale:
 
 ```bash
-cd bot_telegram
 python3 -m venv .venv
 source .venv/bin/activate
 ```
@@ -112,9 +125,10 @@ pip install -r requirements.txt
 3. Configura variabili ambiente:
 
 ```bash
-export TELEGRAM_BOT_TOKEN="INSERISCI_TOKEN_REALE"
-export BOT_DATA_DIR=".bot_data"   # opzionale
-export LOG_LEVEL="INFO"            # opzionale
+export TELEGRAM_BOT_TOKEN="il-tuo-token"
+export ADMIN_TELEGRAM_ID="123456789"   # opzionale, trovalo con @userinfobot
+export BOT_DATA_DIR=".bot_data"        # opzionale
+export LOG_LEVEL="INFO"                # opzionale
 ```
 
 4. Avvia:
@@ -132,24 +146,19 @@ Nel repository sono già presenti:
 
 ### Avvio con Docker Compose
 
-1. Entra nella cartella dedicata:
-
-```bash
-cd bot_telegram
-```
-
-2. Crea il file `.env`:
+1. Crea il file `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-3. Modifica `.env` e imposta il token reale:
+2. Modifica `.env`:
 
 ```env
-TELEGRAM_BOT_TOKEN=INSERISCI_TOKEN_REALE
+TELEGRAM_BOT_TOKEN=il-tuo-token
 LOG_LEVEL=INFO
 BOT_DATA_DIR=/data
+ADMIN_TELEGRAM_ID=123456789
 ```
 
 4. Avvia:
@@ -172,22 +181,18 @@ docker compose down
 
 ## Pipeline CI/CD immagine Docker
 
-È stata aggiunta la workflow GitHub Actions:
-
-- `.github/workflows/docker-bot-image.yml`
+Il file `.github/workflows/docker-bot-image.yml` automatizza la build e il push su GHCR.
 
 Cosa fa:
 
-- builda l'immagine dal contesto `bot_telegram/`
-- pubblica su GHCR: `ghcr.io/<tuo-username>/osservaprezzi-telegram-bot`
-- genera tag `latest` (branch default), `v*` (tag git), e `sha-*`
-- build multi-arch: `linux/amd64` e `linux/arm64`
+- builda l'immagine per `linux/amd64`
+- pubblica su GHCR: `ghcr.io/<tuo-username>/carburanti-bot`
+- genera i tag `latest` (branch default), `v*` (tag git), `sha-*`
 
 Trigger:
 
-- `push` su `main` (solo quando cambia `bot_telegram/**`)
+- `push` su `main`
 - `push` di tag `v*`
-- `pull_request` (build senza push)
 - `workflow_dispatch`
 
 ## Deploy con Portainer (Stack)
@@ -261,3 +266,7 @@ Non perdere i dati: evita di rimuovere la cartella/volume persistente.
 - Notifiche non arrivate:
   - verifica `/mia` e che sia impostata una stazione + `/notifica HH:MM`
   - orario notifiche è in timezone Italia (`Europe/Rome`)
+- Il pulsante `👑 Admin` non appare:
+  - verifica che `ADMIN_TELEGRAM_ID` contenga il tuo ID Telegram (trovalo con `@userinfobot`)
+  - riavvia il bot dopo aver impostato la variabile
+  - supporta più admin separati da virgola: `111111,222222`

@@ -1,11 +1,12 @@
 services:
   osservaprezzi-telegram-bot:
-    image: ghcr.io/${GITHUB_USERNAME}/osservaprezzi-telegram-bot:latest
+    image: ghcr.io/${GITHUB_USERNAME}/carburanti-bot:latest
     container_name: osservaprezzi-telegram-bot
     restart: unless-stopped
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BOT_DATA_DIR: ${BOT_DATA_DIR:-/data}
+      ADMIN_TELEGRAM_ID: ${ADMIN_TELEGRAM_ID:-}
     volumes:
       - ./data:/data
