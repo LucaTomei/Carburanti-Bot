@@ -324,7 +324,13 @@ def format_zone_cheapest(
 
     price, station, fuel = best
     distance = station.get("distance")
-    distance_text = f"{float(distance):.2f} km" if distance is not None else "n/d"
+    if distance is None:
+        distance_text = "n/d"
+    else:
+        try:
+            distance_text = f"{float(distance):.2f} km"
+        except (TypeError, ValueError):
+            distance_text = "n/d"
     lines = [
         "<b>Miglior prezzo trovato</b>",
         f"Carburante: {escape(str(fuel.get('name')))} ({'Self' if fuel.get('isSelf') else 'Servito'})",

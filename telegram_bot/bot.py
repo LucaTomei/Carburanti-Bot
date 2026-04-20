@@ -78,6 +78,7 @@ CB_SETTINGS_DISABLE = "cfg:disable"
 CB_SETTINGS_REMOVE = "cfg:remove"
 CB_SERVICE_EXTEND = "svc:x:"      # svc:x:{radius}:{service_id}
 CB_ADMIN_BROADCAST = "adm:bc"
+CB_ADMIN_MSG_ASK = "adm:ma"
 CB_ADMIN_MSG_LIST = "adm:ml:"   # adm:ml:{page}
 CB_ADMIN_SELECT_MSG = "adm:sm:" # adm:sm:{user_id}
 CB_ADMIN_BLOCK_ASK = "adm:ba"
@@ -370,6 +371,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         if not context.args:
             await update.message.reply_text("Uso: /station <id_stazione>")
             return
@@ -399,12 +402,16 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         await self._storage.update_station(user.id, None)
         await update.message.reply_text("🗑 Stazione preferita rimossa.")
 
     async def cmd_prices(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not user or not update.message:
+            return
+        if not await self._check_not_blocked(update):
             return
 
         station_id = self._resolve_station_id(user.id, context.args)
@@ -435,6 +442,8 @@ class FuelPriceTelegramBot:
     async def cmd_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         if not context.args:
             await update.message.reply_text("Uso: /cerca <testo>")
             return
@@ -443,6 +452,8 @@ class FuelPriceTelegramBot:
 
     async def cmd_nearby(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
+            return
+        if not await self._check_not_blocked(update):
             return
 
         lat, lon, radius = await self._resolve_location_and_radius(update, context)
@@ -467,6 +478,8 @@ class FuelPriceTelegramBot:
 
     async def cmd_best(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
+            return
+        if not await self._check_not_blocked(update):
             return
 
         if len(context.args) < 2:
@@ -521,6 +534,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
 
         if not context.args:
             await update.message.reply_text("Uso: /notifica HH:MM")
@@ -547,6 +562,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         await self._storage.update_notify_time(user.id, None)
         await update.message.reply_text("🔕 Notifiche giornaliere disattivate.")
 
@@ -554,6 +571,8 @@ class FuelPriceTelegramBot:
         del context
         user = update.effective_user
         if not user or not update.message:
+            return
+        if not await self._check_not_blocked(update):
             return
 
         settings = self._storage.get(user.id)
@@ -589,6 +608,9 @@ class FuelPriceTelegramBot:
         data = query.data or ""
         user = update.effective_user
         if not user:
+            return
+        if self._storage.is_blocked(user.id):
+            await query.answer("Non autorizzato.", show_alert=True)
             return
 
         if data.startswith(CB_SET_STATION):
@@ -643,14 +665,21 @@ class FuelPriceTelegramBot:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            page = int(data[len(CB_ADMIN_LIST):] or "0")
+            page = self._parse_page(data[len(CB_ADMIN_LIST):] or "0")
+            if page is None:
+                await query.answer("Pagina non valida.", show_alert=True)
+                return
+            context.user_data["admin_list_page"] = page
             await self._cb_admin_list(query, page)
 
         elif data.startswith(CB_ADMIN_BLOCK):
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            target_id = int(data[len(CB_ADMIN_BLOCK):])
+            target_id = self._parse_user_id(data[len(CB_ADMIN_BLOCK):])
+            if target_id is None:
+                await query.answer("Utente non valido.", show_alert=True)
+                return
             if self._is_admin(target_id):
                 await query.answer("Non puoi bloccare un admin.", show_alert=True)
                 return
@@ -663,7 +692,10 @@ class FuelPriceTelegramBot:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            target_id = int(data[len(CB_ADMIN_UNBLOCK):])
+            target_id = self._parse_user_id(data[len(CB_ADMIN_UNBLOCK):])
+            if target_id is None:
+                await query.answer("Utente non valido.", show_alert=True)
+                return
             await self._storage.set_blocked(target_id, False)
             await query.answer(f"Utente {target_id} sbloccato.")
             page = context.user_data.get("admin_list_page", 0)
@@ -685,14 +717,26 @@ class FuelPriceTelegramBot:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            page = int(data[len(CB_ADMIN_MSG_LIST):] or "0")
+            page = self._parse_page(data[len(CB_ADMIN_MSG_LIST):] or "0")
+            if page is None:
+                await query.answer("Pagina non valida.", show_alert=True)
+                return
             await self._cb_admin_msg_list(query, page)
+
+        elif data == CB_ADMIN_MSG_ASK:
+            if not self._is_admin(user.id):
+                await query.answer("Non autorizzato.", show_alert=True)
+                return
+            await self._cb_admin_msg_list(query, 0)
 
         elif data.startswith(CB_ADMIN_SELECT_MSG):
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
-            target_id = int(data[len(CB_ADMIN_SELECT_MSG):])
+            target_id = self._parse_user_id(data[len(CB_ADMIN_SELECT_MSG):])
+            if target_id is None:
+                await query.answer("Utente non valido.", show_alert=True)
+                return
             context.user_data["admin_msg_target"] = target_id
             context.user_data["awaiting_input"] = "admin_msg_text"
             target_settings = self._storage.get(target_id)
@@ -709,18 +753,26 @@ class FuelPriceTelegramBot:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
+            context.user_data["admin_list_page"] = 0
             await self._cb_admin_list(query, 0)
 
         elif data == CB_ADMIN_UNBLOCK_ASK:
             if not self._is_admin(user.id):
                 await query.answer("Non autorizzato.", show_alert=True)
                 return
+            context.user_data["admin_list_page"] = 0
             await self._cb_admin_list(query, 0)
 
         elif data.startswith(CB_SERVICE_EXTEND):
             payload = data[len(CB_SERVICE_EXTEND):]
+            if ":" not in payload:
+                await query.answer("Azione non valida.", show_alert=True)
+                return
             radius_str, service_id = payload.split(":", 1)
-            radius_km = float(radius_str)
+            radius_km = self._parse_radius(radius_str)
+            if radius_km is None or not service_id:
+                await query.answer("Azione non valida.", show_alert=True)
+                return
             service_label = next(
                 (lbl for lbl, sid in _SERVICE_OPTIONS if sid == service_id), "Servizio"
             )
@@ -743,6 +795,9 @@ class FuelPriceTelegramBot:
 
         elif data.startswith(CB_SERVICE):
             service_id = data[len(CB_SERVICE):]
+            if not service_id:
+                await query.answer("Servizio non valido.", show_alert=True)
+                return
             service_label = next(
                 (lbl for lbl, sid in _SERVICE_OPTIONS if sid == service_id), "Servizio"
             )
@@ -1327,6 +1382,30 @@ class FuelPriceTelegramBot:
         except ValueError:
             return False
 
+    @staticmethod
+    def _parse_user_id(raw: str) -> int | None:
+        try:
+            user_id = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return user_id if user_id > 0 else None
+
+    @staticmethod
+    def _parse_page(raw: str) -> int | None:
+        try:
+            page = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return page if page >= 0 else None
+
+    @staticmethod
+    def _parse_radius(raw: str) -> float | None:
+        try:
+            radius = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return radius if 0 < radius <= 100 else None
+
     def _get_client(self) -> OsservaprezziClient:
         if self._client is None:
             raise RuntimeError("Client API non inizializzato")
@@ -1468,6 +1547,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         if not self._is_admin(user.id):
             await update.message.reply_text("Non autorizzato.")
             return
@@ -1501,6 +1582,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         if not self._is_admin(user.id):
             return
         if not context.args:
@@ -1532,6 +1615,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         if not self._is_admin(user.id):
             return
         if not context.args or len(context.args) < 2:
@@ -1559,6 +1644,8 @@ class FuelPriceTelegramBot:
         user = update.effective_user
         if not user or not update.message:
             return
+        if not await self._check_not_blocked(update):
+            return
         if not self._is_admin(user.id):
             return
         if not context.args or not context.args[0].isdigit():
@@ -1574,6 +1661,8 @@ class FuelPriceTelegramBot:
     async def cmd_unblock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not user or not update.message:
+            return
+        if not await self._check_not_blocked(update):
             return
         if not self._is_admin(user.id):
             return
@@ -1636,7 +1725,13 @@ def _format_service_results(
         brand = str(s.get("brand") or "n/d")
         addr = str(s.get("address") or "")
         distance = s.get("distance") or s.get("distance_km")
-        dist_text = f"{float(distance):.2f} km" if distance is not None else "n/d"
+        if distance is None:
+            dist_text = "n/d"
+        else:
+            try:
+                dist_text = f"{float(distance):.2f} km"
+            except (TypeError, ValueError):
+                dist_text = "n/d"
         lines.append(f"{i}. <b>{escape(name)}</b> · {escape(brand)}")
         if addr:
             lines.append(f"   📌 {escape(addr)}")
